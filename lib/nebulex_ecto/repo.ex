@@ -78,6 +78,7 @@ defmodule NebulexEcto.Repo do
   @doc false
   defmacro __using__(opts) do
     quote bind_quoted: [opts: opts] do
+      require Logger
       alias NebulexEcto.Repo, as: CacheableRepo
 
       {cache, repo} = CacheableRepo.compile_config(__MODULE__, opts)
@@ -88,6 +89,10 @@ defmodule NebulexEcto.Repo do
       def __cache__, do: @cache
 
       def __repo__, do: @repo
+
+      def all(queryable, opts \\ []) do
+        do_all(queryable, opts, &@repo.all/2)
+      end
 
       def get(queryable, id, opts \\ []) do
         do_get(queryable, id, opts, &@repo.get/3)
@@ -151,30 +156,73 @@ defmodule NebulexEcto.Repo do
       def key(struct, key) when is_atom(struct),
         do: {struct, key}
 
-      defp do_get(queryable, key, opts, fallback) do
+      defp do_all(queryable, opts, fallback) do
         {nbx_key, opts} = Keyword.pop(opts, :nbx_key)
-        cache_key = nbx_key || key(queryable, key)
+        {nbx_get_opts, opts} = Keyword.pop(opts, :nbx_get_opts, [])
+        {nbx_set_opts, opts} = Keyword.pop(opts, :nbx_set_opts, [])
+        cache_key = nbx_key || key(queryable, queryable)
 
         cond do
-          value = @cache.get(cache_key) ->
+          value = @cache.get(cache_key, nbx_get_opts) ->
             value
 
-          value = fallback.(queryable, key, opts) ->
-            @cache.set(cache_key, value)
+          value = fallback.(queryable, opts) ->
+            @cache.set(cache_key, value, nbx_set_opts)
 
           true ->
             nil
         end
       end
 
+      defp do_get(queryable, key, opts, fallback) do
+        {nbx_key, opts} = Keyword.pop(opts, :nbx_key)
+        {nbx_get_opts, opts} = Keyword.pop(opts, :nbx_get_opts, [])
+        {nbx_set_opts, opts} = Keyword.pop(opts, :nbx_set_opts, [])
+        redir_key = nbx_key || key(queryable, key)
+
+        cond do
+          value = get_resolve(redir_key, nbx_get_opts) ->
+            Logger.debug("fetched from from cache key=#{inspect(redir_key)} value=#{inspect(value)}")
+            value
+
+          value = fallback.(queryable, key, opts) ->
+            cache_key = key(queryable, value.id)
+            if redir_key != cache_key do
+              value = {:redirect, cache_key}
+              Logger.debug("setting cache key=#{inspect(redir_key)} value=#{inspect(value)}")
+              @cache.set(redir_key, value, nbx_set_opts)
+            end
+            Logger.debug("setting cache key=#{inspect(cache_key)} value=#{inspect(value)}")
+            @cache.set(cache_key, value, nbx_set_opts)
+
+          true ->
+            nil
+        end
+      end
+
+      defp resolve_maybe_value({:redirect, cache_key}, opts) do
+        @cache.get(cache_key, opts)
+      end
+      defp resolve_maybe_value(value, _opts) do
+        value
+      end
+
+      defp get_resolve({:redirect, cache_key}, opts) do
+        resolve_maybe_value(@cache.get(cache_key, opts), opts)
+      end
+      defp get_resolve(cache_key, opts) do
+        resolve_maybe_value(@cache.get(cache_key, opts), opts)
+      end
+
       defp execute(fun, struct_or_changeset, opts) do
         {nbx_key, opts} = Keyword.pop(opts, :nbx_key)
         {nbx_evict, opts} = Keyword.pop(opts, :nbx_evict, :delete)
+        {nbx_opts, opts} = Keyword.pop(opts, :nbx_opts, [])
 
         case fun.(struct_or_changeset, opts) do
           {:ok, schema} = res ->
             cache_key = nbx_key || key(schema, schema.id)
-            _ = cache_evict(nbx_evict, cache_key, schema)
+            _ = cache_evict(nbx_evict, cache_key, schema, nbx_opts)
             res
 
           error ->
@@ -185,18 +233,19 @@ defmodule NebulexEcto.Repo do
       defp execute!(fun, struct_or_changeset, opts) do
         {nbx_key, opts} = Keyword.pop(opts, :nbx_key)
         {nbx_evict, opts} = Keyword.pop(opts, :nbx_evict, :delete)
+        {nbx_opts, opts} = Keyword.pop(opts, :nbx_opts, [])
 
         schema = fun.(struct_or_changeset, opts)
         cache_key = nbx_key || key(schema, schema.id)
-        _ = cache_evict(nbx_evict, cache_key, schema)
+        _ = cache_evict(nbx_evict, cache_key, schema, nbx_opts)
         schema
       end
 
-      defp cache_evict(:delete, key, _),
-        do: @cache.delete(key)
+      defp cache_evict(:delete, key, _, opts),
+        do: @cache.delete(key, opts)
 
-      defp cache_evict(:replace, key, value),
-        do: @cache.set(key, value)
+      defp cache_evict(:replace, key, value, opts),
+        do: @cache.set(key, value, opts)
     end
   end
 

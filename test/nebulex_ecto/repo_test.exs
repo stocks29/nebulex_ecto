@@ -92,7 +92,8 @@ defmodule NebulexEcto.RepoTest do
 
     refute Cache.get({MySchema, 1})
     assert CacheableRepo.get_by(MySchema, id: 1)
-    assert Cache.get({MySchema, [id: 1]})
+    assert Cache.get({MySchema, [id: 1]}) == {:redirect, {MySchema, 1}}
+    assert Cache.get({MySchema, 1}).id == schema.id
     assert Cache.get!({MySchema, [id: 1]})
     refute Cache.get({Ecto.Query, [id: 1]})
 
